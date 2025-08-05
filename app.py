@@ -27,6 +27,7 @@ import math
 import datetime
 from typing import Dict, List, Tuple
 
+import random
 import streamlit as st
 import pandas as pd
 
@@ -266,11 +267,68 @@ def adjust_rpe(base_rpe: Tuple[int, int], week: int, total_weeks: int, progressi
     return base_rpe
 
 
+def select_exercises(mg: str, mp: str, num: int) -> List[str]:
+    """Return a list of ``num`` exercises matching the given muscle group and pattern.
+
+    If there are not enough unique exercises in the database, the list
+    repeats entries as needed.  The order of exercises is determined
+    randomly to introduce variety.
+
+    Parameters
+    ----------
+    mg : str
+        Muscle group.
+    mp : str
+        Movement pattern.
+    num : int
+        Number of exercises to select.
+
+    Returns
+    -------
+    List[str]
+        List of exercise names of length ``num``.
+    """
+    if num <= 0:
+        return []
+    choices: List[str] = []
+    # Primary matches
+    key = (mg, mp)
+    if key in EXERCISE_DB:
+        choices.extend(EXERCISE_DB[key])
+    # Secondary matches: same muscle group
+    for (m, p), ex_list in EXERCISE_DB.items():
+        if m == mg and (m, p) != key:
+            choices.extend(ex_list)
+    # Secondary matches: same pattern
+    for (m, p), ex_list in EXERCISE_DB.items():
+        if p == mp and (m, p) != key and m != mg:
+            choices.extend(ex_list)
+    # If still empty, take all exercises in database
+    if not choices:
+        for ex_list in EXERCISE_DB.values():
+            choices.extend(ex_list)
+    # Ensure deterministic order but vary selection using random sample
+    # Remove duplicates
+    unique_choices = list(dict.fromkeys(choices))
+    # If not enough unique exercises, repeat the list
+    result: List[str] = []
+    while len(result) < num:
+        # Shuffle a copy to vary order
+        pool = unique_choices.copy()
+        random.shuffle(pool)
+        for ex in pool:
+            result.append(ex)
+            if len(result) == num:
+                break
+    return result[:num]
+
+
 def generate_program(num_weeks: int, days_per_week: int,
                      muscle_targets: Dict[str, int], pattern_targets: Dict[str, int],
                      warm_style: str, wod_style: str, acc_style: str,
                      volume_level: str, intensity_level: str,
-                     progression: str) -> pd.DataFrame:
+                     progression: str,
+                     num_wod_ex: int = 2, num_acc_ex: int = 2) -> pd.DataFrame:
     """Assemble the program schedule based on user selections.
 
     Parameters
@@ -316,21 +374,33 @@ def generate_program(num_weeks: int, days_per_week: int,
             day = day_idx + 1
             mg = muscle_schedule[day_idx]
             mp = pattern_schedule[day_idx]
-            ex_wod = choose_exercise(mg, mp)
-            # Secondary selection for accessory: rotate to next target
+            # Select multiple exercises
+            wod_ex_list = select_exercises(mg, mp, num_wod_ex)
+            # Secondary selection for accessory: rotate to next target and pick exercises
             acc_mg = muscle_schedule[(day_idx + 1) % len(muscle_schedule)] if muscle_schedule else ""
             acc_mp = pattern_schedule[(day_idx + 1) % len(pattern_schedule)] if pattern_schedule else ""
-            ex_acc = choose_exercise(acc_mg, acc_mp)
-            # Compute reps and RPE ranges
-            reps_wod = adjust_reps(base_reps, week, num_weeks, progression, day, days_per_week)
-            rpe_wod = adjust_rpe(base_rpe, week, num_weeks, progression, day, days_per_week)
-            # Format rep range as string
-            reps_str = f"{reps_wod[0]}-{reps_wod[1]} reps" if reps_wod[0] != reps_wod[1] else f"{reps_wod[0]} reps"
-            rpe_str = f"{rpe_wod[0]}-{rpe_wod[1]} RPE" if rpe_wod[0] != rpe_wod[1] else f"{rpe_wod[0]} RPE"
+            acc_ex_list = select_exercises(acc_mg, acc_mp, num_acc_ex)
+            # Compute reps and RPE ranges (one per section; will randomise per exercise later)
+            reps_range = adjust_reps(base_reps, week, num_weeks, progression, day, days_per_week)
+            rpe_range = adjust_rpe(base_rpe, week, num_weeks, progression, day, days_per_week)
             # Determine sets per day for each section (based on muscle targets)
-            sets_wod = math.ceil(muscle_targets.get(mg, 0) / days_per_week) if mg else ""
-            sets_acc = math.ceil(muscle_targets.get(acc_mg, 0) / days_per_week) if acc_mg else ""
-            # Append rows for Warm-Up, WOD, and Accessory
+            sets_wod_total = math.ceil(muscle_targets.get(mg, 0) / days_per_week) if mg else 0
+            sets_acc_total = math.ceil(muscle_targets.get(acc_mg, 0) / days_per_week) if acc_mg else 0
+            # Evenly split sets across exercises; at least 1 set per exercise if total sets > 0
+            def split_sets(total_sets: int, num_ex: int) -> List[int]:
+                if total_sets <= 0 or num_ex <= 0:
+                    return [0] * num_ex
+                base = total_sets // num_ex
+                remainder = total_sets % num_ex
+                sets_list = [base] * num_ex
+                for i in range(remainder):
+                    sets_list[i] += 1
+                # Ensure minimum of 1 set if base is zero
+                sets_list = [max(1, s) for s in sets_list]
+                return sets_list
+            wod_sets_list = split_sets(sets_wod_total, len(wod_ex_list))
+            acc_sets_list = split_sets(sets_acc_total, len(acc_ex_list))
+            # Warm-Up row
             rows.append({
                 "Week": week,
                 "Day": day,
@@ -341,32 +411,39 @@ def generate_program(num_weeks: int, days_per_week: int,
                 "Exercise": "",
                 "Sets": "",
                 "Reps/Time": "",
-                "RPE Range": rpe_str,
+                "RPE Range": f"{rpe_range[0]}-{rpe_range[1]} RPE" if rpe_range[0] != rpe_range[1] else f"{rpe_range[0]} RPE",
             })
-            rows.append({
-                "Week": week,
-                "Day": day,
-                "Section": "WOD",
-                "Style": wod_style,
-                "Muscle Group": mg,
-                "Movement Pattern": mp,
-                "Exercise": ex_wod,
-                "Sets": sets_wod,
-                "Reps/Time": reps_str,
-                "RPE Range": rpe_str,
-            })
-            rows.append({
-                "Week": week,
-                "Day": day,
-                "Section": "Accessory",
-                "Style": acc_style,
-                "Muscle Group": acc_mg,
-                "Movement Pattern": acc_mp,
-                "Exercise": ex_acc,
-                "Sets": sets_acc,
-                "Reps/Time": reps_str,
-                "RPE Range": rpe_str,
-            })
+            # WOD rows
+            for ex, sets_per_ex in zip(wod_ex_list, wod_sets_list):
+                # Choose a random rep within range for each exercise
+                rep_val = random.randint(reps_range[0], reps_range[1])
+                rows.append({
+                    "Week": week,
+                    "Day": day,
+                    "Section": "WOD",
+                    "Style": wod_style,
+                    "Muscle Group": mg,
+                    "Movement Pattern": mp,
+                    "Exercise": ex,
+                    "Sets": sets_per_ex if sets_per_ex > 0 else "",
+                    "Reps/Time": f"{rep_val} reps",
+                    "RPE Range": f"{rpe_range[0]}-{rpe_range[1]} RPE" if rpe_range[0] != rpe_range[1] else f"{rpe_range[0]} RPE",
+                })
+            # Accessory rows
+            for ex, sets_per_ex in zip(acc_ex_list, acc_sets_list):
+                rep_val = random.randint(reps_range[0], reps_range[1])
+                rows.append({
+                    "Week": week,
+                    "Day": day,
+                    "Section": "Accessory",
+                    "Style": acc_style,
+                    "Muscle Group": acc_mg,
+                    "Movement Pattern": acc_mp,
+                    "Exercise": ex,
+                    "Sets": sets_per_ex if sets_per_ex > 0 else "",
+                    "Reps/Time": f"{rep_val} reps",
+                    "RPE Range": f"{rpe_range[0]}-{rpe_range[1]} RPE" if rpe_range[0] != rpe_range[1] else f"{rpe_range[0]} RPE",
+                })
     return pd.DataFrame(rows)
 
 
@@ -388,6 +465,17 @@ def main() -> None:
     volume_level = st.sidebar.selectbox("Volume Level", list(VOLUME_LEVELS.keys()))
     intensity_level = st.sidebar.selectbox("Intensity Level", list(INTENSITY_LEVELS.keys()))
     progression = st.sidebar.selectbox("Progression Type", PROGRESSION_TYPES)
+    # Number of exercises per section
+    st.sidebar.markdown("---")
+    st.sidebar.header("Exercises per Section")
+    num_wod_ex = st.sidebar.number_input(
+        "Number of WOD Exercises", min_value=2, max_value=5, value=2, step=1,
+        help="How many exercises to include in each WOD session."
+    )
+    num_acc_ex = st.sidebar.number_input(
+        "Number of Accessory Exercises", min_value=2, max_value=5, value=2, step=1,
+        help="How many exercises to include in each accessory block."
+    )
     st.sidebar.markdown("---")
     st.sidebar.header("Sets per Week Targets")
     st.sidebar.write("Enter the number of sets per week for each muscle group and movement pattern. Leave blank or zero to skip.")
@@ -421,6 +509,8 @@ def main() -> None:
                 volume_level=volume_level,
                 intensity_level=intensity_level,
                 progression=progression,
+                num_wod_ex=int(num_wod_ex),
+                num_acc_ex=int(num_acc_ex),
             )
             st.success("Program generated!")
             st.dataframe(program_df)
