@@ -328,7 +328,8 @@ def generate_program(num_weeks: int, days_per_week: int,
                      warm_style: str, wod_style: str, acc_style: str,
                      volume_level: str, intensity_level: str,
                      progression: str,
-                     num_wod_ex: int = 2, num_acc_ex: int = 2) -> pd.DataFrame:
+                     num_wod_ex: int = 2, num_acc_ex: int = 2,
+                     amrap_format: str = None) -> pd.DataFrame:
     """Assemble the program schedule based on user selections.
 
     Parameters
@@ -386,7 +387,7 @@ def generate_program(num_weeks: int, days_per_week: int,
             # Determine sets per day for each section (based on muscle targets)
             sets_wod_total = math.ceil(muscle_targets.get(mg, 0) / days_per_week) if mg else 0
             sets_acc_total = math.ceil(muscle_targets.get(acc_mg, 0) / days_per_week) if acc_mg else 0
-            # Evenly split sets across exercises; at least 1 set per exercise if total sets > 0
+            # Helper to split sets across exercises; ensures at least one set if total_sets > 0
             def split_sets(total_sets: int, num_ex: int) -> List[int]:
                 if total_sets <= 0 or num_ex <= 0:
                     return [0] * num_ex
@@ -395,7 +396,6 @@ def generate_program(num_weeks: int, days_per_week: int,
                 sets_list = [base] * num_ex
                 for i in range(remainder):
                     sets_list[i] += 1
-                # Ensure minimum of 1 set if base is zero
                 sets_list = [max(1, s) for s in sets_list]
                 return sets_list
             wod_sets_list = split_sets(sets_wod_total, len(wod_ex_list))
@@ -415,8 +415,12 @@ def generate_program(num_weeks: int, days_per_week: int,
             })
             # WOD rows
             for ex, sets_per_ex in zip(wod_ex_list, wod_sets_list):
-                # Choose a random rep within range for each exercise
-                rep_val = random.randint(reps_range[0], reps_range[1])
+                # Choose random rep within range unless AMRAP format is set
+                if wod_style == "AMRAP" and amrap_format:
+                    rep_time_str = amrap_format.replace("(", "").replace(")", "")  # clean parentheses
+                else:
+                    rep_val = random.randint(reps_range[0], reps_range[1])
+                    rep_time_str = f"{rep_val} reps"
                 rows.append({
                     "Week": week,
                     "Day": day,
@@ -426,12 +430,16 @@ def generate_program(num_weeks: int, days_per_week: int,
                     "Movement Pattern": mp,
                     "Exercise": ex,
                     "Sets": sets_per_ex if sets_per_ex > 0 else "",
-                    "Reps/Time": f"{rep_val} reps",
+                    "Reps/Time": rep_time_str,
                     "RPE Range": f"{rpe_range[0]}-{rpe_range[1]} RPE" if rpe_range[0] != rpe_range[1] else f"{rpe_range[0]} RPE",
                 })
             # Accessory rows
             for ex, sets_per_ex in zip(acc_ex_list, acc_sets_list):
-                rep_val = random.randint(reps_range[0], reps_range[1])
+                if wod_style == "AMRAP" and amrap_format:
+                    rep_time_str = amrap_format.replace("(", "").replace(")", "")
+                else:
+                    rep_val = random.randint(reps_range[0], reps_range[1])
+                    rep_time_str = f"{rep_val} reps"
                 rows.append({
                     "Week": week,
                     "Day": day,
@@ -441,7 +449,7 @@ def generate_program(num_weeks: int, days_per_week: int,
                     "Movement Pattern": acc_mp,
                     "Exercise": ex,
                     "Sets": sets_per_ex if sets_per_ex > 0 else "",
-                    "Reps/Time": f"{rep_val} reps",
+                    "Reps/Time": rep_time_str,
                     "RPE Range": f"{rpe_range[0]}-{rpe_range[1]} RPE" if rpe_range[0] != rpe_range[1] else f"{rpe_range[0]} RPE",
                 })
     return pd.DataFrame(rows)
@@ -465,6 +473,20 @@ def main() -> None:
     volume_level = st.sidebar.selectbox("Volume Level", list(VOLUME_LEVELS.keys()))
     intensity_level = st.sidebar.selectbox("Intensity Level", list(INTENSITY_LEVELS.keys()))
     progression = st.sidebar.selectbox("Progression Type", PROGRESSION_TYPES)
+    # AMRAP configuration: only show when WOD style is AMRAP
+    amrap_format = None
+    if wod_style == "AMRAP":
+        st.sidebar.markdown("---")
+        st.sidebar.header("AMRAP Format")
+        amrap_format = st.sidebar.radio(
+            "How should the 20-minute AMRAP be structured?",
+            options=[
+                "Single 20-min AMRAP",
+                "Two 8-min sections (2-min rest)",
+                "Four 4-min sections (1-min rest)",
+            ],
+            index=0,
+        )
     # Number of exercises per section
     st.sidebar.markdown("---")
     st.sidebar.header("Exercises per Section")
@@ -511,6 +533,7 @@ def main() -> None:
                 progression=progression,
                 num_wod_ex=int(num_wod_ex),
                 num_acc_ex=int(num_acc_ex),
+                amrap_format=amrap_format,
             )
             st.success("Program generated!")
             st.dataframe(program_df)
